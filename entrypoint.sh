@@ -118,6 +118,16 @@ git cherry-pick $MERGE_COMMIT &> /tmp/error.log || (
 )
 
 # push back
-git push origindest origindest/$TARGET_BRANCH:$TARGET_BRANCH
+# Push the cherry-picked branch to a new branch
+NEW_BRANCH="cherry-pick-${PR_NUMBER}-${TARGET_BRANCH}"
+git push origindest HEAD:$NEW_BRANCH
 
-gh pr comment $PR_NUMBER --body "🤖 says: cherry pick action finished successfully 🎉!<br/>See: https://github.com/$REPO_NAME/actions/runs/$GITHUB_RUN_ID"
+# Create a pull request
+gh pr create --repo $REPO_NAME \
+    --base $TARGET_BRANCH \
+    --head $NEW_BRANCH \
+    --title "Cherry-pick PR #$PR_NUMBER to $TARGET_BRANCH" \
+    --body "🤖 says: This PR cherry-picks changes from PR #$PR_NUMBER to $TARGET_BRANCH."
+
+# Comment on the original PR to inform the user
+gh pr comment $PR_NUMBER --body "🤖 says: Cherry-pick action completed successfully 🎉! A new pull request has been created: [Cherry-pick PR](https://github.com/$REPO_NAME/compare/$NEW_BRANCH)."
