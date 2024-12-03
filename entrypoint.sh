@@ -8,9 +8,9 @@ PR_NUMBER=$(jq -r ".issue.number" "$GITHUB_EVENT_PATH")
 COMMENT_BODY=$(jq -r ".comment.body" "$GITHUB_EVENT_PATH")
 GITHUB_RUN_URL="https://github.com/$REPO_NAME/actions/runs/$GITHUB_RUN_ID"
 
-# Check for the /simple-cherry-pick command
-if [[ ! "$COMMENT_BODY" =~ ^/simple-cherry-pick ]]; then
-    echo "Not a /simple-cherry-pick command. Exiting."
+# Check for the /cherry-pick command
+if [[ ! "$COMMENT_BODY" =~ ^/cherry-pick ]]; then
+    echo "Not a /cherry-pick command. Exiting."
     exit 0
 fi
 
@@ -21,7 +21,7 @@ TARGET_BRANCH=$(echo "$TARGET" | awk -F':' '{ print $2 }' | tr -d '[:space:]')
 
 if [[ -z "$SOURCE_REPO" || -z "$TARGET_BRANCH" ]]; then
     echo "Invalid command format."
-    gh pr comment $PR_NUMBER --body "🤖 says: ‼️ Please specify the target in the format: \`/simple-cherry-pick source_repo:/target-branch\`."
+    gh pr comment $PR_NUMBER --body "🤖 says: ‼️ Please specify the target in the format: \`/cherry-pick source_repo:/target-branch\`."
     exit 1
 fi
 
