@@ -15,7 +15,7 @@ if [[ ! "$COMMENT_BODY" =~ ^/simple-cherry-pick ]]; then
 fi
 
 # Extract source_repo and target_branch from the command
-TARGET=$(echo "$COMMENT_BODY" | awk -F'"' '{ print $2 }')
+TARGET=$(echo "$COMMENT_BODY" | awk '{ print $2 }')
 SOURCE_REPO=$(echo "$TARGET" | awk -F':' '{ print $1 }' | tr -d '[:space:]')
 TARGET_BRANCH=$(echo "$TARGET" | awk -F':' '{ print $2 }' | tr -d '[:space:]')
 
