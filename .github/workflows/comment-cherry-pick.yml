@@ -19,6 +19,6 @@ jobs:
           token: ${{ steps.generate-token.outputs.token }}
           fetch-depth: 0 # otherwise, you will fail to push refs to dest repo
       - name: Automatic Cherry Pick
-        uses: tier4/simple-cherry-pick@v2
+        uses: tier4/simple-cherry-pick@v2_beta
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
