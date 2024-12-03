@@ -2,122 +2,76 @@
 
 set -e
 
+# Extract PR and Repository Info
 REPO_NAME=$(jq -r ".repository.full_name" "$GITHUB_EVENT_PATH")
-
-onerror() {
-	gh pr comment $PR_NUMBER --body "🤖 says: ‼️ cherry pick action failed.<br/>See: https://github.com/$REPO_NAME/actions/runs/$GITHUB_RUN_ID"
-	exit 1
-}
-trap onerror ERR
-
-if [ -z "$PR_NUMBER" ]; then
-	PR_NUMBER=$(jq -r ".pull_request.number" "$GITHUB_EVENT_PATH")
-	if [[ "$PR_NUMBER" == "null" ]]; then
-		PR_NUMBER=$(jq -r ".issue.number" "$GITHUB_EVENT_PATH")
-	fi
-	if [[ "$PR_NUMBER" == "null" ]]; then
-		echo "Failed to determine PR Number."
-		exit 1
-	fi
-fi
-
+PR_NUMBER=$(jq -r ".issue.number" "$GITHUB_EVENT_PATH")
 COMMENT_BODY=$(jq -r ".comment.body" "$GITHUB_EVENT_PATH")
+GITHUB_RUN_URL="https://github.com/$REPO_NAME/actions/runs/$GITHUB_RUN_ID"
 
-echo "Collecting information about PR #$PR_NUMBER of $GITHUB_REPOSITORY..."
-
-if [[ -z "$GITHUB_TOKEN" ]]; then
-	echo "Set the GITHUB_TOKEN env variable."
-	exit 1
+# Check for the /simple-cherry-pick command
+if [[ ! "$COMMENT_BODY" =~ ^/simple-cherry-pick ]]; then
+    echo "Not a /simple-cherry-pick command. Exiting."
+    exit 0
 fi
 
+# Extract source_repo and target_branch from the command
+TARGET=$(echo "$COMMENT_BODY" | awk -F'"' '{ print $2 }')
+SOURCE_REPO=$(echo "$TARGET" | awk -F':' '{ print $1 }' | tr -d '[:space:]')
+TARGET_BRANCH=$(echo "$TARGET" | awk -F':' '{ print $2 }' | tr -d '[:space:]')
+
+if [[ -z "$SOURCE_REPO" || -z "$TARGET_BRANCH" ]]; then
+    echo "Invalid command format."
+    gh pr comment $PR_NUMBER --body "🤖 says: ‼️ Please specify the target in the format: \`/simple-cherry-pick source_repo:/target-branch\`."
+    exit 1
+fi
+
+# Get the merge commit from the PR
 URI=https://api.github.com
-API_HEADER="Accept: application/vnd.github.v3+json"
 AUTH_HEADER="Authorization: token $GITHUB_TOKEN"
+API_HEADER="Accept: application/vnd.github.v3+json"
 
-MAX_RETRIES=${MAX_RETRIES:-6}
-RETRY_INTERVAL=${RETRY_INTERVAL:-10}
-MERGED=""
-MERGE_COMMIT=""
-pr_resp=""
+pr_resp=$(gh api "${URI}/repos/$REPO_NAME/pulls/$PR_NUMBER")
+MERGED=$(echo "$pr_resp" | jq -r .merged)
+MERGE_COMMIT=$(echo "$pr_resp" | jq -r .merge_commit_sha)
 
-for ((i = 0 ; i < $MAX_RETRIES ; i++)); do
-	pr_resp=$(gh api "${URI}/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
-	MERGED=$(echo "$pr_resp" | jq -r .merged)
-	MERGE_COMMIT=$(echo "$pr_resp" | jq -r .merge_commit_sha)
-	if [[ "$MERGED" == "null" ]]; then
-		echo "The PR is not ready to cherry-pick, retry after $RETRY_INTERVAL seconds"
-		sleep $RETRY_INTERVAL
-		continue
-	else
-		break
-	fi
-done
-
-if [[ "$MERGED" != "true" ]] ; then
-	echo "PR is not merged! Can't cherry pick it."
-	gh pr comment $PR_NUMBER --body "🤖 says: ‼️ PR can't be cherry-picked, please merge it first."
-	exit 1
+if [[ "$MERGED" != "true" ]]; then
+    gh pr comment $PR_NUMBER --body "🤖 says: ‼️ This PR is not merged yet. Cherry-pick can only be performed on merged PRs."
+    exit 1
 fi
 
-BASE_REPO=$(echo "$pr_resp" | jq -r .base.repo.full_name)
+# Prepare cherry-pick
+CHERRY_PICK_BRANCH="cherry-pick/$PR_NUMBER-to-$TARGET_BRANCH"
 
-TARGET_BRANCH=$(jq -r ".comment.body" "$GITHUB_EVENT_PATH" | awk '{ print $2 }'  | tr -d '[:space:]')
+git config --global user.name "github-actions[bot]"
+git config --global user.email "github-actions[bot]@users.noreply.github.com"
+git remote set-url origin https://x-access-token:$GITHUB_TOKEN@github.com/$REPO_NAME.git
 
-USER_LOGIN=$(jq -r ".comment.user.login" "$GITHUB_EVENT_PATH")
-
-if [[ "$USER_LOGIN" == "null" ]]; then
-	USER_LOGIN=$(jq -r ".pull_request.user.login" "$GITHUB_EVENT_PATH")
+# Add source repository as remote if it differs from the target repo
+if [[ "$SOURCE_REPO" != "$REPO_NAME" ]]; then
+    git remote add source https://x-access-token:$GITHUB_TOKEN@github.com/$SOURCE_REPO.git
 fi
 
-user_resp=$(curl -X GET -s -H "${AUTH_HEADER}" -H "${API_HEADER}" \
-	"${URI}/users/${USER_LOGIN}")
-
-USER_NAME=$(echo "$user_resp" | jq -r ".name")
-if [[ "$USER_NAME" == "null" ]]; then
-	USER_NAME=$USER_LOGIN
-fi
-USER_NAME="${USER_NAME} (Cherry Pick PR Action)"
-
-USER_EMAIL=$(echo "$user_resp" | jq -r ".email")
-if [[ "$USER_EMAIL" == "null" ]]; then
-	USER_EMAIL="$USER_LOGIN@users.noreply.github.com"
-fi
-
-if [[ -z "$TARGET_BRANCH" ]]; then
-	echo "Cannot get target branch information for PR #$PR_NUMBER!"
-	gh pr comment $PR_NUMBER --body "🤖 says: ‼️ Cannot get target branch information."
-	exit 1
-fi
-
-echo "Target branch for PR #$PR_NUMBER is $TARGET_BRANCH"
-
-USER_TOKEN=${USER_LOGIN//-/_}_TOKEN
-UNTRIMMED_COMMITTER_TOKEN=${!USER_TOKEN:-$GITHUB_TOKEN}
-COMMITTER_TOKEN="$(echo -e "${UNTRIMMED_COMMITTER_TOKEN}" | tr -d '[:space:]')"
-
-# See https://github.com/actions/checkout/issues/766 for motivation.
-git config --global --add safe.directory /github/workspace
-
-git remote set-url origin https://$USER_LOGIN:$COMMITTER_TOKEN@github.com/$GITHUB_REPOSITORY.git
-git config --global user.email "$USER_EMAIL"
-git config --global user.name "$USER_NAME"
-
-git remote add origindest https://$USER_LOGIN:$COMMITTER_TOKEN@github.com/$REPO_NAME.git
-
-set -o xtrace
-
-# make sure branches are up-to-date
+# Fetch target branch and create new branch for cherry-pick
 git fetch origin $TARGET_BRANCH
-git fetch origindest $TARGET_BRANCH
+git checkout -b $CHERRY_PICK_BRANCH origin/$TARGET_BRANCH
 
-# do the cherry-pick
-git checkout -b origindest/$TARGET_BRANCH origindest/$TARGET_BRANCH
-git cherry-pick $MERGE_COMMIT &> /tmp/error.log || (
-		gh pr comment $PR_NUMBER --body "🤖 says: Error cherry-picking.<br/><br/>$(cat /tmp/error.log)"
-		exit 1
-)
+# Perform cherry-pick
+git cherry-pick $MERGE_COMMIT &> /tmp/error.log || {
+    gh pr comment $PR_NUMBER --body "🤖 says: ‼️ Cherry-picking failed.<br/><br/>$(cat /tmp/error.log)"
+    exit 1
+}
 
-# push back
-git push origindest origindest/$TARGET_BRANCH:$TARGET_BRANCH
+# Push new branch to the target repository
+git push origin HEAD:$CHERRY_PICK_BRANCH
 
-gh pr comment $PR_NUMBER --body "🤖 says: cherry pick action finished successfully 🎉!<br/>See: https://github.com/$REPO_NAME/actions/runs/$GITHUB_RUN_ID"
+# Create PR for cherry-picked changes
+PR_TITLE="Cherry-pick PR #$PR_NUMBER to $TARGET_BRANCH"
+PR_BODY="🤖 says: This PR cherry-picks changes from PR #$PR_NUMBER into the target branch $TARGET_BRANCH in $SOURCE_REPO."
+
+gh pr create --base $TARGET_BRANCH --head $CHERRY_PICK_BRANCH --title "$PR_TITLE" --body "$PR_BODY" || {
+    gh pr comment $PR_NUMBER --body "🤖 says: ‼️ Failed to create Pull Request for the cherry-picked changes. See: $GITHUB_RUN_URL"
+    exit 1
+}
+
+# Notify success
+gh pr comment $PR_NUMBER --body "🤖 says: Cherry-picking completed successfully! A new PR has been created: [View PR](https://github.com/$SOURCE_REPO/pull/$(gh pr view --json number --jq '.number'))."
